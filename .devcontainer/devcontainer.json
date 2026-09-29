@@ -31,5 +31,7 @@
       ]
     }
   },
-  "postCreateCommand": "pip install --ignore-installed sentence-transformers kserve torchvision peft"
+  // build-essential provides the C compiler Triton JIT-compiles against at runtime
+  // (see docker/Dockerfile). Requires passwordless sudo for the remote user.
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential && pip install --ignore-installed sentence-transformers kserve torchvision peft"
 }

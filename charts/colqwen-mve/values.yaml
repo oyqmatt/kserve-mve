@@ -1,0 +1,72 @@
+# -- Name of the InferenceService and of the model registered inside the
+# serving container (SERVED_MODEL_NAME). These MUST match, because KServe
+# routes /v2/models/<name>/infer using this value.
+model:
+  name: mxbai
+  # -- Hugging Face repo id passed to MultiVectorEncoder (HF_MODEL_NAME).
+  hfModelName: mixedbread-ai/mxbai-edge-colbert-v0-17m
+  # -- Optional KServe model storageUri (e.g. pvc://, s3://, gs://). Leave empty
+  # to let the container download the model from Hugging Face at startup.
+  storageUri: ""
+
+image:
+  repository: localhost/kserve_img
+  tag: latest
+  pullPolicy: Always
+  # -- Pull secrets attached to the ServingRuntime pod.
+  imagePullSecrets: []
+
+# -- Optional Hugging Face token for gated/private models. Leave tokenSecretName
+# empty to skip.
+huggingface:
+  tokenSecretName: ""
+  tokenSecretKey: token
+
+runtime:
+  # -- Create the ServingRuntime/ClusterServingRuntime alongside the InferenceService.
+  create: true
+  # -- ServingRuntime (namespaced) or ClusterServingRuntime (cluster-scoped).
+  kind: ServingRuntime
+  # -- Defaults to "<model.name>-runtime".
+  name: ""
+  modelFormatName: colqwen
+  modelFormatVersion: "1"
+  autoSelect: true
+  protocolVersions:
+    - v2
+  # -- Extra env vars for the serving container (list of {name,value} or
+  # {name,valueFrom}). HF_MODEL_NAME, SERVED_MODEL_NAME, PROTOCOL and the
+  # Hugging Face token are set automatically.
+  extraEnv: []
+
+# -- Serverless (Knative) autoscaling for the predictor.
+deployment:
+  # -- Keep >= 1 to avoid cold-start model downloads.
+  minReplicas: 1
+  maxReplicas: 5
+  scaleTarget: 10
+  scaleMetric: concurrency   # concurrency | rps | cpu | memory
+  scaleToZeroGracePeriod: 60s
+
+# -- Applied to the predictor container (GPU request/limit goes here).
+resources:
+  requests:
+    cpu: "1"
+    memory: 4Gi
+  limits:
+    cpu: "2"
+    memory: 8Gi
+    nvidia.com/gpu: "1"
+
+predictor:
+  # -- ServiceAccount used by the predictor pod (e.g. to reference a secret).
+  serviceAccountName: ""
+  # -- Pull secrets on the InferenceService predictor pod.
+  imagePullSecrets: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+inferenceService:
+  # -- Extra annotations on the InferenceService (e.g. Knative autoscaling).
+  annotations: {}

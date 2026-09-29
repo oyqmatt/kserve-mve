@@ -29,6 +29,7 @@ tensor([[53.5625, 49.2036, 46.6958, 45.4949],
 ├── serve.py                  # Standalone local demo (vidore/colqwen-omni-v0.1)
 ├── requirements.txt          # Python dependencies (currently unpinned)
 ├── docker/Dockerfile         # Container image for the serving entrypoint
+├── charts/colqwen-mve/       # Helm chart: ServingRuntime + InferenceService (serverless KServe)
 ├── Makefile                  # `make build` shortcut
 ├── test.sh / test.json       # Curl smoke test + sample payload
 └── .devcontainer/            # GPU devcontainer (docker-in-docker, Python 3.12)
@@ -36,7 +37,7 @@ tensor([[53.5625, 49.2036, 46.6958, 45.4949],
 
 Two entrypoints exist:
 
-- `multi_vector_encoder.py` — the production serving path. Subclasses `kserve.Model`, loads `mixedbread-ai/mxbai-edge-colbert-v0-17m`, and exposes the KServe predict endpoint.
+- `multi_vector_encoder.py` — the production serving path. Subclasses `kserve.Model`, loads `mixedbread-ai/mxbai-edge-colbert-v0-17m`, and exposes the KServe **V2 (Open Inference Protocol)** `infer` endpoint.
 - `serve.py` — a scripted local demo using `vidore/colqwen-omni-v0.1` against example document images; useful for inspecting tensor shapes and scores without a server.
 
 ## Prerequisites
@@ -64,41 +65,86 @@ With the server running:
 ./test.sh
 # equivalent to:
 # curl -H "Content-Type: application/json" \
-#   http://localhost:8080/v1/models/mxbai:predict -d @./test.json
+#   http://localhost:8080/v2/models/mxbai/infer -d @./test.json
 ```
 
 `test.json`:
 
 ```json
 {
-  "queries": ["Which planet is known as the Red Planet?"],
-  "documents": [
-    "Venus is often called Earth's twin because of its similar size and proximity.",
-    "Mars, known for its reddish appearance, is often referred to as the Red Planet.",
-    "Jupiter, the largest planet in our solar system, has a prominent red spot.",
-    "Saturn, famous for its rings, is sometimes mistaken for the Red Planet."
+  "inputs": [
+    {
+      "name": "queries",
+      "shape": [1],
+      "datatype": "BYTES",
+      "data": ["Which planet is known as the Red Planet?"]
+    },
+    {
+      "name": "documents",
+      "shape": [4],
+      "datatype": "BYTES",
+      "data": [
+        "Venus is often called Earth's twin because of its similar size and proximity.",
+        "Mars, known for its reddish appearance, is often referred to as the Red Planet.",
+        "Jupiter, the largest planet in our solar system, has a prominent red spot.",
+        "Saturn, famous for its rings, is sometimes mistaken for the Red Planet."
+      ]
+    }
   ]
 }
 ```
 
 ## API reference
 
-**Endpoint:** `POST /v1/models/mxbai:predict`
+This server implements the [KServe V2 / Open Inference Protocol](https://kserve.github.io/website/docs/concepts/architecture/data-plane/v2-protocol). The Python SDK also mounts the legacy V1 route, but the V2 endpoint is the supported interface.
+
+**Endpoint:** `POST /v2/models/mxbai/infer`
 
 **Request body**
 
-| Field       | Type            | Description                                  |
-| ----------- | --------------- | -------------------------------------------- |
-| `queries`   | `string[]`      | Query texts to encode.                       |
-| `documents` | `string[]`      | Document texts (or image paths/URLs) to score.|
+| Field    | Type            | Description                                   |
+| -------- | --------------- | --------------------------------------------- |
+| `inputs` | `object[]`      | Named `BYTES` tensors `queries` and `documents`. |
+
+Each input follows the V2 tensor schema:
+
+| Key        | Type       | Description                                             |
+| ---------- | ---------- | ------------------------------------------------------- |
+| `name`     | `string`   | `"queries"` or `"documents"`.                           |
+| `shape`    | `int[]`    | Tensor shape, e.g. `[1]` or `[4]`.                      |
+| `datatype` | `string`   | `"BYTES"` (UTF-8 text).                                 |
+| `data`     | `string[]` | Query/document texts (flat, row-major).                 |
 
 **Response body**
 
 ```json
-{ "predictions": [[53.56, 49.20, 46.70, 45.49]] }
+{
+  "model_name": "mxbai",
+  "id": "e0e0e0e0-...",
+  "outputs": [
+    {
+      "name": "predictions",
+      "shape": [1, 4],
+      "datatype": "FP32",
+      "data": [53.56, 49.20, 46.70, 45.49]
+    }
+  ]
+}
 ```
 
-`predictions` is a 2D array: one row per query, one column per document.
+`predictions` is a `[num_queries, num_documents]` score matrix (flattened row-major in `data`).
+
+## Configuration
+
+The model is configured through environment variables (no code changes needed):
+
+| Variable            | Default                                       | Description                                                                 |
+| ------------------- | --------------------------------------------- | --------------------------------------------------------------------------- |
+| `HF_MODEL_NAME`     | `mixedbread-ai/mxbai-edge-colbert-v0-17m`     | Hugging Face repo id passed to `MultiVectorEncoder`.                        |
+| `SERVED_MODEL_NAME` | `mxbai`                                       | Model name registered with `ModelServer`; must match the route/deployment.  |
+| `HF_TOKEN`          | *(unset)*                                     | Hugging Face token for gated/private repos.                                 |
+
+Because KServe routes `/v2/models/<name>/infer`, `SERVED_MODEL_NAME` must equal the served route name (the Helm chart wires it to the InferenceService name automatically).
 
 ## Docker
 
@@ -115,6 +161,39 @@ docker run --gpus all -p 8080:8080 localhost/kserve_img:latest
 ```
 
 > The current image installs dependencies and starts the server, but does **not** bake model weights into the image — the model is downloaded from Hugging Face on first start. See the next steps below.
+
+## Deploy to serverless KServe (Helm)
+
+`charts/colqwen-mve` renders a namespaced `ServingRuntime` (protocol `v2`) plus an `InferenceService` that references it. It targets KServe's serverless (Knative) mode.
+
+```bash
+# Point the chart at your pushed image first.
+helm upgrade --install colqwen charts/colqwen-mve \
+  --namespace kserve-test --create-namespace \
+  --set image.repository=<registry>/<repo> \
+  --set image.tag=<tag>
+```
+
+Common overrides (`charts/colqwen-mve/values.yaml`):
+
+| Value                        | Purpose                                                        |
+| ---------------------------- | -------------------------------------------------------------- |
+| `model.name`                 | InferenceService + served model name (default `mxbai`).        |
+| `model.hfModelName`          | Hugging Face repo id (`HF_MODEL_NAME`).                        |
+| `model.storageUri`           | Optional KServe `storageUri` instead of downloading from HF.   |
+| `runtime.kind`               | `ServingRuntime` or `ClusterServingRuntime`.                   |
+| `deployment.minReplicas`     | `1` keeps the model warm; `0` enables scale-to-zero.           |
+| `resources.limits."nvidia.com/gpu"` | GPU request/limit for the predictor.                    |
+| `predictor.nodeSelector` / `predictor.tolerations` | Schedule onto GPU nodes.                      |
+| `huggingface.tokenSecretName`| Secret holding an `HF_TOKEN` for gated models.                 |
+
+After the `InferenceService` reports `READY=True`:
+
+```bash
+kubectl -n kserve-test get inferenceservice mxbai
+```
+
+`helm status colqwen -n kserve-test` prints the exact `curl` smoke test (it is also in `templates/NOTES.txt`).
 
 ## Next steps for production deployment
 
@@ -136,7 +215,7 @@ The repository currently targets local development. The following work is requir
 
 ### 3. Serving and scaling
 
-- [ ] Add a KServe `InferenceService` manifest (or Knative/RawDeployment) instead of running the container directly.
+- [ ] Add a KServe `InferenceService` manifest (or Knative/RawDeployment) instead of running the container directly. Set `spec.predictor.model.protocolVersion: v2` so KServe routes the V2 `infer` endpoint to this runtime.
 - [ ] Configure GPU node scheduling, resource requests/limits, and `minReplicas` for warm capacity.
 - [ ] Enable autoscaling and request batching.
 - [ ] Define readiness/liveness probes against the KServe ready endpoint.

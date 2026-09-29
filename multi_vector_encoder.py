@@ -1,20 +1,21 @@
 import argparse
+import os
 import time
-
-from cffi import model
-import torch
-from PIL import Image
-from typing import Dict
+from typing import Dict, List, Union
 
 import kserve
-from kserve import Model, ModelServer, logging
-from kserve.model_server import app
+from kserve import InferOutput, InferRequest, InferResponse, Model, ModelServer
+from kserve.errors import InvalidInput
 from kserve.utils.utils import generate_uuid
 
 from sentence_transformers import MultiVectorEncoder
 
+DEFAULT_MODEL_NAME = "mxbai-edge-colbert-v0-17m"
+DEFAULT_MODEL_PATH = "mixedbread-ai/mxbai-edge-colbert-v0-17m"
+
+
 class MVE(Model):
-    def __init__(self, name: str, model_path = "mixedbread-ai/mxbai-edge-colbert-v0-17m"):
+    def __init__(self, name: str, model_path: str = DEFAULT_MODEL_PATH):
         super().__init__(name, return_response_headers=True)
         self.name = name
         self.model_path = model_path
@@ -26,33 +27,81 @@ class MVE(Model):
         # set to True when model is loaded successfully without exceptions.
         self.ready = True
 
+    def get_input_types(self) -> List[Dict]:
+        return [
+            {"name": "queries", "datatype": "BYTES", "shape": [-1]},
+            {"name": "documents", "datatype": "BYTES", "shape": [-1]},
+        ]
+
+    def get_output_types(self) -> List[Dict]:
+        return [{"name": "predictions", "datatype": "FP32", "shape": [-1, -1]}]
+
+    @staticmethod
+    def _decode_bytes_input(request: InferRequest, name: str) -> List[str]:
+        """Extract a flat list of UTF-8 strings from a v2 BYTES input tensor."""
+        infer_input = request.get_input_by_name(name)
+        if infer_input is None:
+            raise InvalidInput(f"Missing required input tensor '{name}'")
+        if infer_input.datatype != "BYTES":
+            raise InvalidInput(
+                f"Input tensor '{name}' must have datatype BYTES, got {infer_input.datatype}"
+            )
+
+        data = infer_input.data
+        if data is None or (not isinstance(data, (str, bytes)) and len(data) == 0):
+            data = infer_input.as_numpy().flatten().tolist()
+        elif isinstance(data, (str, bytes)):
+            data = [data]
+
+        flattened: List = []
+        for item in data:
+            if isinstance(item, (list, tuple)):
+                flattened.extend(item)
+            else:
+                flattened.append(item)
+
+        return [
+            item.decode("utf-8") if isinstance(item, bytes) else str(item)
+            for item in flattened
+        ]
+
     async def predict(
         self,
-        payload: Dict,
+        payload: Union[Dict, InferRequest],
         headers: Dict[str, str] = None,
         response_headers: Dict[str, str] = None,
-    ) -> Dict:
+    ) -> Union[Dict, InferResponse]:
         start = time.time()
-        queries = payload.get("queries", [])
-        documents = payload.get("documents", [])
 
-        # queries = [
-        #     "What is the variable represented on the y-axis of the graph?",
-        #     "Total outlay is maximum in which year?",
-        # ]
-        # documents = [
-        #     "Venus is often called Earth's twin because of its similar size and proximity.",
-        #     "Mars, known for its reddish appearance, is often referred to as the Red Planet.",
-        #     "Jupiter, the largest planet in our solar system, has a prominent red spot.",
-        #     "Saturn, famous for its rings, is sometimes mistaken for the Red Planet.",
-        # ]
+        # v2 endpoints pass an InferRequest, v1 endpoints pass a plain dict.
+        if isinstance(payload, InferRequest):
+            queries = self._decode_bytes_input(payload, "queries")
+            documents = self._decode_bytes_input(payload, "documents")
+        else:
+            queries = payload.get("queries", [])
+            documents = payload.get("documents", [])
 
         query_embeddings = self.model.encode_query(queries)
         document_embeddings = self.model.encode_document(documents)
-        scores = self.model.similarity(query_embeddings, document_embeddings)
+        scores = self.model.similarity(query_embeddings, document_embeddings).tolist()
         print(f"Prediction time: {time.time() - start:.2f} seconds")
-        # Convert tensors to lists for JSON serialization
-        scores = scores.tolist()
+
+        if isinstance(payload, InferRequest):
+            num_queries = len(scores)
+            num_documents = len(scores[0]) if scores else 0
+            return InferResponse(
+                response_id=payload.id or generate_uuid(),
+                model_name=self.name,
+                infer_outputs=[
+                    InferOutput(
+                        name="predictions",
+                        shape=[num_queries, num_documents],
+                        datatype="FP32",
+                        data=[float(score) for row in scores for score in row],
+                    )
+                ],
+            )
+
         return {"predictions": scores}
 
 
@@ -61,5 +110,8 @@ args, _ = parser.parse_known_args()
 
 if __name__ == "__main__":
     # Configure kserve and uvicorn logger
-    model = MVE("mxbai")
+    model = MVE(
+        os.environ.get("SERVED_MODEL_NAME", DEFAULT_MODEL_NAME),
+        os.environ.get("HF_MODEL_NAME", DEFAULT_MODEL_PATH),
+    )
     ModelServer().start([model])

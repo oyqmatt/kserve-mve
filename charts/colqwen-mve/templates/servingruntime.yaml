@@ -1,0 +1,62 @@
+{{- if .Values.runtime.create }}
+{{- $runtimeName := include "colqwen-mve.runtimeName" . -}}
+apiVersion: serving.kserve.io/v1alpha1
+kind: {{ .Values.runtime.kind }}
+metadata:
+  name: {{ $runtimeName }}
+  {{- if eq .Values.runtime.kind "ServingRuntime" }}
+  namespace: {{ .Release.Namespace }}
+  {{- end }}
+  labels:
+    {{- include "colqwen-mve.labels" . | nindent 4 }}
+spec:
+  supportedModelFormats:
+    - name: {{ .Values.runtime.modelFormatName }}
+      version: {{ .Values.runtime.modelFormatVersion | quote }}
+      autoSelect: {{ .Values.runtime.autoSelect }}
+  protocolVersions:
+    {{- toYaml .Values.runtime.protocolVersions | nindent 4 }}
+  {{- with .Values.image.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: kserve-container
+      image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      ports:
+        - name: http1
+          containerPort: 8080
+          protocol: TCP
+      env:
+        - name: PROTOCOL
+          value: v2
+        - name: HF_MODEL_NAME
+          value: {{ .Values.model.hfModelName | quote }}
+        - name: SERVED_MODEL_NAME
+          value: {{ include "colqwen-mve.modelName" . | quote }}
+        {{- if .Values.huggingface.tokenSecretName }}
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.huggingface.tokenSecretName }}
+              key: {{ .Values.huggingface.tokenSecretKey }}
+        {{- end }}
+        {{- with .Values.runtime.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      # Model weights download on first start; allow generous startup time.
+      readinessProbe:
+        httpGet:
+          path: /v2/health/ready
+          port: 8080
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        failureThreshold: 30
+      livenessProbe:
+        httpGet:
+          path: /v2/health/live
+          port: 8080
+        initialDelaySeconds: 180
+        periodSeconds: 20
+{{- end }}

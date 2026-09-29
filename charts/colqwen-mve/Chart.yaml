@@ -1,0 +1,6 @@
+apiVersion: v2
+name: colqwen-mve
+description: Serverless KServe InferenceService for the ColQwen multi-vector (late-interaction) encoder
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

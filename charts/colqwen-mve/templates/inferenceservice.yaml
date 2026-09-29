@@ -1,0 +1,52 @@
+{{- $scaleToZero := and (eq (int .Values.deployment.minReplicas) 0) .Values.deployment.scaleToZeroGracePeriod -}}
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: {{ include "colqwen-mve.modelName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "colqwen-mve.labels" . | nindent 4 }}
+  {{- if or $scaleToZero .Values.inferenceService.annotations }}
+  annotations:
+    {{- if $scaleToZero }}
+    autoscaling.knative.dev/scale-to-zero-grace-period: {{ .Values.deployment.scaleToZeroGracePeriod | quote }}
+    {{- end }}
+    {{- with .Values.inferenceService.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  predictor:
+    minReplicas: {{ .Values.deployment.minReplicas }}
+    maxReplicas: {{ .Values.deployment.maxReplicas }}
+    scaleTarget: {{ .Values.deployment.scaleTarget }}
+    scaleMetric: {{ .Values.deployment.scaleMetric }}
+    {{- with .Values.predictor.serviceAccountName }}
+    serviceAccountName: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.predictor.imagePullSecrets }}
+    imagePullSecrets:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.predictor.nodeSelector }}
+    nodeSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.predictor.tolerations }}
+    tolerations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.predictor.affinity }}
+    affinity:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    model:
+      modelFormat:
+        name: {{ .Values.runtime.modelFormatName }}
+      runtime: {{ include "colqwen-mve.runtimeName" . }}
+      protocolVersion: v2
+      {{- if .Values.model.storageUri }}
+      storageUri: {{ .Values.model.storageUri | quote }}
+      {{- end }}
+      resources:
+        {{- toYaml .Values.resources | nindent 8 }}
