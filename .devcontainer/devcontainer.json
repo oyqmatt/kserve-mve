@@ -1,17 +1,22 @@
 {
-  "name": "MVE_container",
-  "image": "python:3.12-slim",
-    // Set the user for VS Code server, terminal, and sub-processes
-  "remoteUser": "${localEnv:USER}",
-  
-  // Set the user for the entire container lifecycle (optional but recommended)
-  "containerUser": "${localEnv:USER}",
-  
-  // Ensure VS Code maps your local UID/GID to the container user to avoid permission issues
-  "updateRemoteUserUID": true,
-  "features": {
-    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  "name": "MVE_container_kserve",
+  "build": {
+    "dockerfile": "./Dockerfile",
+    "context": "."
   },
+  
+  // Set to the user explicitly built in the Dockerfile
+  "remoteUser": "vscode",
+  "containerUser": "vscode",
+  "updateRemoteUserUID": true,
+  
+  "features": {
+    // Allows seamless integration with host clusters like Kind/Minikube
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+      "moby": false
+    }
+  },
+  
   "runArgs": [
     "--gpus",
     "all"
@@ -19,19 +24,19 @@
   "hostRequirements": {
     "gpu": true
   },
+  
   "customizations": {
     "vscode": {
       "extensions": [
-        "ms-python.python",              // Core Python environment support
-        "ms-python.vscode-pylance",     // Fast type-checking and auto-imports
-        "ms-python.debugpy",            // Debugger for tensor shape investigation
-        "ms-toolsai.datawrangler",      // Visual data profiling and cleaning
-        "github.copilot",               // Optional: AI assistance for boilerplate PyTorch code
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.debugpy",
+        "ms-toolsai.datawrangler",
         "charliermarsh.ruff"
       ]
     }
   },
-  // build-essential provides the C compiler Triton JIT-compiles against at runtime
-  // (see docker/Dockerfile). Requires passwordless sudo for the remote user.
-  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential && pip install --ignore-installed sentence-transformers kserve torchvision peft"
+  
+  // Executed as the 'vscode' user. Sudo works safely now.
+  "postCreateCommand": "pip install --no-cache-dir sentence-transformers kserve torchvision peft"
 }

@@ -1,23 +1,6 @@
 {
-    "inputs": [
-        {
-            "name": "queries",
-            "shape": [1],
-            "datatype": "BYTES",
-            "data": [
-                "Which planet is known as the Red Planet?"
-            ]
-        },
-        {
-            "name": "documents",
-            "shape": [4],
-            "datatype": "BYTES",
-            "data": [
-                "Venus is often called Earth's twin because of its similar size and proximity.",
-                "Mars, known for its reddish appearance, is often referred to as the Red Planet.",
-                "Jupiter, the largest planet in our solar system, has a prominent red spot.",
-                "Saturn, famous for its rings, is sometimes mistaken for the Red Planet."
-            ]
-        }
-    ]
+  "documents": [
+    "A recording describes a person seeking a taxi.",
+    "A short conversation about finding a book in a shop."
+  ]
 }

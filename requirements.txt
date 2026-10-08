@@ -1,4 +1,5 @@
 kserve
-sentence-transformers
+sentence-transformers[audio]>=6.0.0
 peft
 torchvision
+soundfile

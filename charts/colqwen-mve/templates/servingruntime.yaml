@@ -35,6 +35,8 @@ spec:
           value: {{ .Values.model.hfModelName | quote }}
         - name: SERVED_MODEL_NAME
           value: {{ include "colqwen-mve.modelName" . | quote }}
+        - name: DEVICE
+          value: {{ .Values.runtime.device | quote }}
         {{- if .Values.huggingface.tokenSecretName }}
         - name: HF_TOKEN
           valueFrom:

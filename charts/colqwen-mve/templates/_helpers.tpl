@@ -1,10 +1,8 @@
 {{/*
-The served model name. This value is used both as the InferenceService name and
-as SERVED_MODEL_NAME inside the container, so KServe routes
-/v2/models/<name>/infer to the model registered by ModelServer.
+The served model name is used as the InferenceService and ModelServer name.
 */}}
 {{- define "colqwen-mve.modelName" -}}
-{{- default "mxbai" .Values.model.name -}}
+{{- default "colqwen" .Values.model.name -}}
 {{- end -}}
 
 {{- define "colqwen-mve.runtimeName" -}}

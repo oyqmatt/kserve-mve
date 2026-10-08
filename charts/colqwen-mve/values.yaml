@@ -1,10 +1,9 @@
-# -- Name of the InferenceService and of the model registered inside the
-# serving container (SERVED_MODEL_NAME). These MUST match, because KServe
-# routes /v2/models/<name>/infer using this value.
+# -- Name of the InferenceService and model registered inside the serving
+# container (SERVED_MODEL_NAME).
 model:
-  name: mxbai
+  name: colqwen
   # -- Hugging Face repo id passed to MultiVectorEncoder (HF_MODEL_NAME).
-  hfModelName: mixedbread-ai/mxbai-edge-colbert-v0-17m
+  hfModelName: vidore/colqwen-omni-v0.1
   # -- Optional KServe model storageUri (e.g. pvc://, s3://, gs://). Leave empty
   # to let the container download the model from Hugging Face at startup.
   storageUri: ""
@@ -34,6 +33,9 @@ runtime:
   autoSelect: true
   protocolVersions:
     - v2
+  # -- Torch device for the encoder (DEVICE). Defaults to cpu: the 4.4B
+  # checkpoint does not fit consumer GPUs, so memory is sized in `resources`.
+  device: cpu
   # -- Extra env vars for the serving container (list of {name,value} or
   # {name,valueFrom}). HF_MODEL_NAME, SERVED_MODEL_NAME, PROTOCOL and the
   # Hugging Face token are set automatically.
@@ -43,20 +45,21 @@ runtime:
 deployment:
   # -- Keep >= 1 to avoid cold-start model downloads.
   minReplicas: 1
-  maxReplicas: 5
+  maxReplicas: 1
   scaleTarget: 10
   scaleMetric: concurrency   # concurrency | rps | cpu | memory
   scaleToZeroGracePeriod: 60s
 
-# -- Applied to the predictor container (GPU request/limit goes here).
+# -- Applied to the predictor container. Inference runs on CPU, so memory is the
+# main constraint: a 4.4B checkpoint needs ~9 GiB of weights in bf16 before
+# activations, so size the limit generously.
 resources:
   requests:
-    cpu: "1"
-    memory: 4Gi
+    cpu: "4"
+    memory: 12Gi
   limits:
-    cpu: "2"
-    memory: 8Gi
-    nvidia.com/gpu: "1"
+    cpu: "8"
+    memory: 24Gi
 
 predictor:
   # -- ServiceAccount used by the predictor pod (e.g. to reference a secret).

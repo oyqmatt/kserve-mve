@@ -15,5 +15,5 @@ Wait for the InferenceService to report READY=True, then smoke test:
   SERVICE_HOSTNAME=$(kubectl -n {{ .Release.Namespace }} get inferenceservice {{ include "colqwen-mve.modelName" . }} -o jsonpath='{.status.url}' | cut -d/ -f3)
 
   curl -s -H "Host: ${SERVICE_HOSTNAME}" -H "Content-Type: application/json" \
-    "http://${INGRESS_HOST}:${INGRESS_PORT}/v2/models/{{ include "colqwen-mve.modelName" . }}/infer" \
+    "http://${INGRESS_HOST}:${INGRESS_PORT}/embed/docs" \
     -d @test.json

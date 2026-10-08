@@ -1,49 +1,46 @@
-# ColQwen Multi-Vector Encoder
+# ColQwen Omni Embedding API
 
-A [ColQwen](https://github.com/illuin-tech/colpali)-style **multi-vector (late-interaction)** encoder served with [KServe](https://kserve.github.io/website/). Queries and documents are encoded into per-token embedding matrices, and scored with a **MaxSim** late-interaction similarity, the same retrieval paradigm used by ColBERT/ColPali for text and visual document retrieval.
+A [ColQwen Omni](https://huggingface.co/vidore/colqwen-omni-v0.1) multi-vector encoder served with [KServe](https://kserve.github.io/website/). The service exposes separate embedding endpoints for audio documents, text documents, and queries. Query inputs can be text or audio. It returns token-level embeddings, and the KServe V2 `infer` endpoint scores precomputed query and document embeddings with ColBERT **MaxSim** late interaction.
 
 ## How it works
 
-The encoder produces one embedding vector per token/visual patch rather than a single pooled vector:
+The encoder produces one vector per token or audio feature rather than a single pooled vector. Responses return the full batch unchanged: a list of variable-length matrices shaped `(tokens, dimensions)`, even when the request contains a single input.
 
 ```text
 Query 0 shape:    (61, 128)
 Document 0 shape: (1034, 128)
 ```
 
-`model.similarity(...)` then computes a MaxSim score matrix (rows = queries, columns = documents):
+- `encode_document(...)` embeds audio or text documents.
+- `encode_query(...)` embeds text or audio queries.
+- The KServe V2 `infer` endpoint computes a MaxSim score matrix from previously
+  returned query and document embeddings.
 
 ```text
-tensor([[53.5625, 49.2036, 46.6958, 45.4949],
-        [45.6436, 53.1328, 45.0957, 45.5176]])
+Query tokens:    (61, 128)
+Document tokens: (1034, 128)
+MaxSim score:    53.5625
 ```
-
-- `encode_query(list[str])` / `encode_document(list[str | image])` → per-item embedding tensors.
-- `similarity(query_embeddings, document_embeddings)` → score tensor.
 
 ## Repository layout
 
 ```text
 .
-├── multi_vector_encoder.py   # KServe Model wrapper + HTTP server (primary entrypoint)
-├── serve.py                  # Standalone local demo (vidore/colqwen-omni-v0.1)
+├── multi_vector_encoder.py   # KServe model wrapper + embed + MaxSim endpoints
 ├── requirements.txt          # Python dependencies (currently unpinned)
 ├── docker/Dockerfile         # Container image for the serving entrypoint
 ├── charts/colqwen-mve/       # Helm chart: ServingRuntime + InferenceService (serverless KServe)
 ├── Makefile                  # `make build` shortcut
-├── test.sh / test.json       # Curl smoke test + sample payload
-└── .devcontainer/            # GPU devcontainer (docker-in-docker, Python 3.12)
+├── test.py / test.json       # Stdlib smoke test (prints shapes) + payload for Helm NOTES
+└── .devcontainer/            # Devcontainer (docker-in-docker, Python 3.12)
 ```
 
-Two entrypoints exist:
-
-- `multi_vector_encoder.py` — the production serving path. Subclasses `kserve.Model`, loads `mixedbread-ai/mxbai-edge-colbert-v0-17m`, and exposes the KServe **V2 (Open Inference Protocol)** `infer` endpoint.
-- `serve.py` — a scripted local demo using `vidore/colqwen-omni-v0.1` against example document images; useful for inspecting tensor shapes and scores without a server.
+`multi_vector_encoder.py` loads `vidore/colqwen-omni-v0.1` and serves the three REST embedding endpoints below, alongside KServe health endpoints. Inference runs on **CPU** by default: the 4.4B checkpoint does not fit a consumer GPU, so plan for roughly 9 GiB of RAM for the weights alone plus headroom for activations.
 
 ## Prerequisites
 
 - Python 3.12
-- NVIDIA GPU + drivers (the `.devcontainer` requests `--gpus all`)
+- ~16 GiB RAM or more (the checkpoint is 4.4B parameters and runs on CPU)
 - Docker (for container builds)
 
 ## Quickstart
@@ -55,84 +52,122 @@ pip install -r requirements.txt
 python multi_vector_encoder.py
 ```
 
-The server listens on port `8080` by default. For a GPU-backed environment, open the repo in the provided devcontainer (it enables docker-in-docker and passes through all GPUs).
+The server listens on port `8080` by default. The first start downloads the model from Hugging Face; subsequent starts reuse the cache.
+
+> CPU inference of a 4.4B model is slow — expect several seconds per request even on a many-core host. Set `DEVICE=cuda` to use a GPU if one has enough VRAM.
 
 ### Smoke test
 
 With the server running:
 
 ```bash
-./test.sh
-# equivalent to:
-# curl -H "Content-Type: application/json" \
-#   http://localhost:8080/v2/models/mxbai/infer -d @./test.json
+python test.py
 ```
 
-`test.json`:
+The script uses only the standard library. It posts documents and a text query
+to `/embed/docs` and `/embed/query`, synthesizes a PCM16 sine for
+`/embed/audio`, then runs the full round-trip through the MaxSim `infer`
+endpoint, printing each returned embedding shape, e.g.:
+
+```text
+embed/docs   shapes: [[15, 128], [17, 128]]
+embed/query  shapes: [[10, 128]]
+embed/audio  shapes: [[23, 128]]
+maxsim       shape: [1, 2]
+```
+
+Useful flags: `--base-url`, `--skip-audio`, `--skip-maxsim`.
+
+> **For API consumers:** the precise client-facing contract — request/response
+> schemas, audio formats, error semantics, guarantees and limits — lives in
+> [`docs/API_CONTRACT.md`](docs/API_CONTRACT.md). This README section is a
+> summary.
+
+## API reference
+
+The server exposes three JSON endpoints:
+
+### `POST /embed/audio`
+
+Embed one audio document. `audio` is base64-encoded, already-decoded **raw little-endian PCM16, 16-bit mono at 16 kHz**; it is converted to float32 in `[-1, 1]` without further resampling.
+
+```json
+{"audio": "<base64-pcm16>"}
+```
+
+A WAV container is also accepted and is down-mixed to mono and resampled to 16 kHz.
+
+Returns `{"embeddings": [[[...], ...]]}`: a batch of one embedding matrix, where each matrix holds one token/feature vector per row. The batch dimension is preserved.
+
+### `POST /embed/docs`
+
+Embed a batch of text documents.
+
+```json
+{"documents": ["First document text", "Second document text"]}
+```
+
+Returns `{"embeddings": [[[...], ...], ...]}`, one variable-length token embedding matrix per document.
+
+### `POST /embed/query`
+
+Embed one query. Provide exactly one of `text` or `audio`; `audio` uses the same base64 PCM16 (16 kHz mono) format as `/embed/audio`.
+
+```json
+{"text": "Find audio about carsickness"}
+```
+
+or
+
+```json
+{"audio": "<base64-pcm16>"}
+```
+
+Returns `{"embeddings": [[[...], ...]]}`: a batch of one embedding matrix, with the batch dimension preserved. Images are not accepted.
+
+### `POST /v2/models/colqwen/infer` (MaxSim)
+
+Scores precomputed query embeddings against document embeddings using ColBERT
+late interaction. This is the KServe **V2 (Open Inference Protocol)** endpoint,
+so inputs are named FP32 tensors. It returns one score matrix
+`(num_queries, num_documents)`; entry `[i, j]` is `sum over query tokens of the
+max dot product against document j's tokens`.
+
+Batches are ragged (each query/document has its own token count), so embeddings
+can be sent two ways:
+
+- **Padded:** `queries`/`documents` shaped `(batch, tokens, dim)`, right-padded
+  to a common length.
+- **Flattened:** `queries`/`documents` shaped `(total_tokens, dim)` with a
+  matching `query_lengths`/`document_lengths` INT tensor giving the per-item
+  token counts.
+
+`query_lengths`/`document_lengths` are optional for padded tensors (defaulting
+to the full padded length) and required for flattened tensors. All tensors must
+share the same embedding dimension.
 
 ```json
 {
   "inputs": [
-    {
-      "name": "queries",
-      "shape": [1],
-      "datatype": "BYTES",
-      "data": ["Which planet is known as the Red Planet?"]
-    },
-    {
-      "name": "documents",
-      "shape": [4],
-      "datatype": "BYTES",
-      "data": [
-        "Venus is often called Earth's twin because of its similar size and proximity.",
-        "Mars, known for its reddish appearance, is often referred to as the Red Planet.",
-        "Jupiter, the largest planet in our solar system, has a prominent red spot.",
-        "Saturn, famous for its rings, is sometimes mistaken for the Red Planet."
-      ]
-    }
+    {"name": "queries", "shape": [1, 2, 3], "datatype": "FP32",
+     "data": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]},
+    {"name": "documents", "shape": [2, 2, 3], "datatype": "FP32",
+     "data": [0.1, 0.1, 0.1, 0.2, 0.2, 0.2, 0.3, 0.3, 0.3, 0.4, 0.4, 0.4]}
   ]
 }
 ```
 
-## API reference
-
-This server implements the [KServe V2 / Open Inference Protocol](https://kserve.github.io/website/docs/concepts/architecture/data-plane/v2-protocol). The Python SDK also mounts the legacy V1 route, but the V2 endpoint is the supported interface.
-
-**Endpoint:** `POST /v2/models/mxbai/infer`
-
-**Request body**
-
-| Field    | Type            | Description                                   |
-| -------- | --------------- | --------------------------------------------- |
-| `inputs` | `object[]`      | Named `BYTES` tensors `queries` and `documents`. |
-
-Each input follows the V2 tensor schema:
-
-| Key        | Type       | Description                                             |
-| ---------- | ---------- | ------------------------------------------------------- |
-| `name`     | `string`   | `"queries"` or `"documents"`.                           |
-| `shape`    | `int[]`    | Tensor shape, e.g. `[1]` or `[4]`.                      |
-| `datatype` | `string`   | `"BYTES"` (UTF-8 text).                                 |
-| `data`     | `string[]` | Query/document texts (flat, row-major).                 |
-
-**Response body**
+Returns:
 
 ```json
 {
-  "model_name": "mxbai",
-  "id": "e0e0e0e0-...",
+  "model_name": "colqwen",
+  "id": "...",
   "outputs": [
-    {
-      "name": "predictions",
-      "shape": [1, 4],
-      "datatype": "FP32",
-      "data": [53.56, 49.20, 46.70, 45.49]
-    }
+    {"name": "scores", "shape": [1, 2], "datatype": "FP32", "data": [0.42, 0.84]}
   ]
 }
 ```
-
-`predictions` is a `[num_queries, num_documents]` score matrix (flattened row-major in `data`).
 
 ## Configuration
 
@@ -140,11 +175,12 @@ The model is configured through environment variables (no code changes needed):
 
 | Variable            | Default                                       | Description                                                                 |
 | ------------------- | --------------------------------------------- | --------------------------------------------------------------------------- |
-| `HF_MODEL_NAME`     | `mixedbread-ai/mxbai-edge-colbert-v0-17m`     | Hugging Face repo id passed to `MultiVectorEncoder`.                        |
-| `SERVED_MODEL_NAME` | `mxbai`                                       | Model name registered with `ModelServer`; must match the route/deployment.  |
+| `HF_MODEL_NAME`     | `vidore/colqwen-omni-v0.1`                    | Audio-capable Hugging Face model id passed to `MultiVectorEncoder`.         |
+| `SERVED_MODEL_NAME` | `colqwen`                                     | Model name registered with `ModelServer`; must match the deployment name.   |
+| `DEVICE`            | `cpu`                                         | Torch device for the encoder, e.g. `cpu` or `cuda`.                          |
 | `HF_TOKEN`          | *(unset)*                                     | Hugging Face token for gated/private repos.                                 |
 
-Because KServe routes `/v2/models/<name>/infer`, `SERVED_MODEL_NAME` must equal the served route name (the Helm chart wires it to the InferenceService name automatically).
+The custom `/embed/...` routes are served by the same KServe HTTP server. KServe health endpoints remain available for probes.
 
 ## Docker
 
@@ -154,10 +190,10 @@ make build
 # docker build -f docker/Dockerfile -t localhost/kserve_img:latest .
 ```
 
-Run the image (GPU recommended):
+Run the image:
 
 ```bash
-docker run --gpus all -p 8080:8080 localhost/kserve_img:latest
+docker run -p 8080:8080 localhost/kserve_img:latest
 ```
 
 > The current image installs dependencies and starts the server, but does **not** bake model weights into the image — the model is downloaded from Hugging Face on first start. See the next steps below.
@@ -178,19 +214,20 @@ Common overrides (`charts/colqwen-mve/values.yaml`):
 
 | Value                        | Purpose                                                        |
 | ---------------------------- | -------------------------------------------------------------- |
-| `model.name`                 | InferenceService + served model name (default `mxbai`).        |
+| `model.name`                 | InferenceService + served model name (default `colqwen`).      |
 | `model.hfModelName`          | Hugging Face repo id (`HF_MODEL_NAME`).                        |
 | `model.storageUri`           | Optional KServe `storageUri` instead of downloading from HF.   |
 | `runtime.kind`               | `ServingRuntime` or `ClusterServingRuntime`.                   |
+| `runtime.device`             | Torch device (`DEVICE`); default `cpu` for CPU-only serving.   |
 | `deployment.minReplicas`     | `1` keeps the model warm; `0` enables scale-to-zero.           |
-| `resources.limits."nvidia.com/gpu"` | GPU request/limit for the predictor.                    |
-| `predictor.nodeSelector` / `predictor.tolerations` | Schedule onto GPU nodes.                      |
+| `resources.requests/limits` | CPU and memory for the predictor (CPU inference; memory-bound). |
+| `predictor.nodeSelector` / `predictor.tolerations` | Schedule onto suitable nodes.               |
 | `huggingface.tokenSecretName`| Secret holding an `HF_TOKEN` for gated models.                 |
 
 After the `InferenceService` reports `READY=True`:
 
 ```bash
-kubectl -n kserve-test get inferenceservice mxbai
+kubectl -n kserve-test get inferenceservice colqwen
 ```
 
 `helm status colqwen -n kserve-test` prints the exact `curl` smoke test (it is also in `templates/NOTES.txt`).
@@ -202,12 +239,12 @@ The repository currently targets local development. The following work is requir
 ### 1. Dependency and model reproducibility
 
 - [ ] Pin versions in `requirements.txt` (or adopt a lock file such as `uv.lock` / `pip-compile`). The `sentence_transformers.MultiVectorEncoder` API requires a specific `sentence-transformers` release; unpinned installs are not reproducible.
-- [ ] Pin/record the exact model revision (`mixedbread-ai/mxbai-edge-colbert-v0-17m`) instead of tracking the default branch.
+- [ ] Pin/record the exact model revision (`vidore/colqwen-omni-v0.1`) instead of tracking the default branch.
 - [ ] Bake weights into the image or mount a pre-populated model cache volume to eliminate cold-start downloads and external network dependency.
 
 ### 2. Container hardening
 
-- [ ] Switch to a CUDA-enabled base image (e.g. `nvidia/cuda` + matching PyTorch) so GPU serving does not depend on the host Python environment.
+- [ ] Switch to a CUDA-enabled base image (e.g. `nvidia/cuda` + matching PyTorch) if you later move inference to GPU.
 - [ ] Run the container as a non-root user.
 - [ ] Add a `.dockerignore` to keep the build context small and avoid leaking local files.
 - [ ] Add a `HEALTHCHECK` hitting the model readiness endpoint.
@@ -215,21 +252,20 @@ The repository currently targets local development. The following work is requir
 
 ### 3. Serving and scaling
 
-- [ ] Add a KServe `InferenceService` manifest (or Knative/RawDeployment) instead of running the container directly. Set `spec.predictor.model.protocolVersion: v2` so KServe routes the V2 `infer` endpoint to this runtime.
-- [ ] Configure GPU node scheduling, resource requests/limits, and `minReplicas` for warm capacity.
-- [ ] Enable autoscaling and request batching.
+- [ ] Keep the KServe runtime protocol and custom `/embed/...` routes aligned with the deployed ingress configuration.
+- [ ] Configure node scheduling, resource requests/limits, and `minReplicas` for warm capacity.
+- [ ] Enable autoscaling and request batching (CPU inference is the throughput bottleneck).
 - [ ] Define readiness/liveness probes against the KServe ready endpoint.
 
 ### 4. Configuration
 
-- [ ] Make the model path and served model name configurable via arguments/env vars instead of hardcoded values in `multi_vector_encoder.py`.
-- [ ] Remove unused imports (`cffi`, `torch`, `PIL.Image`, `kserve.model_server.app`, `generate_uuid`).
-- [ ] Support image/path inputs for `documents` (currently `serve.py` demonstrates image URLs, but the server path is text-only).
+- [ ] Make the 16 kHz audio sample rate configurable if deployments require a different model processor rate.
+- [ ] Add explicit request size limits for text and base64 audio payloads.
 
 ### 5. Observability
 
 - [ ] Structured JSON logging with request IDs.
-- [ ] Metrics for request latency, throughput, batch size, and GPU utilization.
+- [ ] Metrics for request latency, throughput, batch size, and CPU utilization.
 - [ ] Distributed tracing across the gateway and model server.
 
 ### 6. Security
@@ -246,11 +282,10 @@ The repository currently targets local development. The following work is requir
 
 ### 8. Testing
 
-- [ ] Unit tests for request parsing and score shaping.
-- [ ] Integration tests against a running server using `test.json`.
+- [ ] Unit tests for request parsing, WAV decoding/resampling, and embedding serialization.
+- [ ] Integration tests against a running server for all three `/embed/...` endpoints.
 - [ ] Load tests to validate latency under batch/concurrency.
 
 ### 9. Input robustness
 
-- [ ] Handle remote image fetching failures, oversized documents, and malformed payloads gracefully.
-- [ ] Validate and cap input sizes to protect GPU memory.
+- [ ] Validate and cap WAV payload sizes and text lengths to protect memory.
